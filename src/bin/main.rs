@@ -9,6 +9,7 @@ use std::{
 use std::{path::PathBuf, sync::mpsc};
 
 use clap::Parser;
+use eframe::egui::ColorImage;
 use env_logger::{Builder, Env};
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use image::DynamicImage;
@@ -18,20 +19,28 @@ use xcap::Window;
 
 use wfinfo::{
     database::Database,
-    ocr::{normalize_string, reward_image_to_reward_names, OCR},
+    ocr::{
+        normalize_string, reward_image_to_reward_names, reward_image_to_reward_names_with_rects,
+        OCR,
+    },
+    overlay::{run_overlay, OverlayHandle, OverlayOptions, RewardLabel, WindowGeometry},
     utils::fetch_prices_and_items,
 };
 
-fn run_detection(capturer: &Window, db: &Database) {
+fn run_detection(capturer: &Window, db: &Database) -> Vec<RewardLabel> {
     let frame = capturer.capture_image().unwrap();
     info!("Captured");
     let image = DynamicImage::ImageRgba8(frame);
     info!("Converted");
-    let text = reward_image_to_reward_names(image, None);
-    let text = text.iter().map(|s| normalize_string(s));
+    detect_rewards(image, db)
+}
+
+fn detect_rewards(image: DynamicImage, db: &Database) -> Vec<RewardLabel> {
+    let parts = reward_image_to_reward_names_with_rects(image, None);
+    let text: Vec<_> = parts.iter().map(|(s, _rect)| normalize_string(s)).collect();
     debug!("{:#?}", text);
 
-    let items: Vec<_> = text.map(|s| db.find_item(&s, None)).collect();
+    let items: Vec<_> = text.iter().map(|s| db.find_item(s, None)).collect();
 
     let best = items
         .iter()
@@ -59,6 +68,19 @@ fn run_detection(capturer: &Window, db: &Database) {
             warn!("Unknown item\n\tUnknown");
         }
     }
+
+    items
+        .iter()
+        .zip(&parts)
+        .enumerate()
+        .map(|(index, (item, (_text, rect)))| RewardLabel {
+            rect: *rect,
+            name: item.map(|item| item.drop_name.clone()),
+            platinum: item.map_or(0.0, |item| item.platinum),
+            ducats_platinum: item.map_or(0.0, |item| item.ducats as f32 / 10.0),
+            best: item.is_some() && Some(index) == best,
+        })
+        .collect()
 }
 
 fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
@@ -163,6 +185,18 @@ struct Arguments {
     /// some systems may require the window name to be specified (e.g. when using gamescope)
     #[arg(short, long, default_value = "Warframe")]
     window_name: String,
+    /// Only print prices to the console, don't show the in-game overlay
+    #[arg(long)]
+    no_overlay: bool,
+    /// How many seconds the overlay keeps prices on screen
+    #[arg(long, default_value_t = 20.0)]
+    overlay_duration: f32,
+    /// Vertical distance in pixels between the prices and the item names
+    #[arg(long, default_value_t = 10.0)]
+    overlay_offset: f32,
+    /// Analyze this screenshot instead of watching the game (for testing the overlay)
+    #[arg(long, hide = true)]
+    test_image: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -180,8 +214,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         .format_target(false)
         .init();
 
+    let (prices, items) = fetch_prices_and_items()?;
+    let db = Database::load_from_file(Some(&prices), Some(&items));
+
+    info!("Loaded database");
+
+    if let Some(test_image) = arguments.test_image {
+        let image = image::open(test_image)?;
+        let geometry = WindowGeometry {
+            x: 0,
+            y: 0,
+            width: image.width(),
+            height: image.height(),
+        };
+        let background = ColorImage::from_rgba_unmultiplied(
+            [image.width() as usize, image.height() as usize],
+            &image.to_rgba8(),
+        );
+        let labels = detect_rewards(image, &db);
+        drop(OCR.lock().unwrap().take());
+        if arguments.no_overlay {
+            return Ok(());
+        }
+        let options = OverlayOptions {
+            geometry,
+            display_duration: Duration::from_secs_f32(arguments.overlay_duration),
+            vertical_offset: arguments.overlay_offset,
+            background: Some(background),
+        };
+        run_overlay(options, move |overlay| overlay.show(labels))?;
+        return Ok(());
+    }
+
     let windows = Window::all()?;
-    let Some(warframe_window) = windows.iter().find(|x| x.title() == window_name) else {
+    let Some(warframe_window) = windows.into_iter().find(|x| x.title() == window_name) else {
         return Err("Warframe window not found".into());
     };
 
@@ -191,23 +257,51 @@ fn main() -> Result<(), Box<dyn Error>> {
         warframe_window.height()
     );
 
-    let (prices, items) = fetch_prices_and_items()?;
-    let db = Database::load_from_file(Some(&prices), Some(&items));
-
-    info!("Loaded database");
+    let geometry = WindowGeometry {
+        x: warframe_window.x(),
+        y: warframe_window.y(),
+        width: warframe_window.width(),
+        height: warframe_window.height(),
+    };
 
     let (event_sender, event_receiver) = channel();
 
     log_watcher(log_path, event_sender.clone());
     hotkey_watcher("F12".parse()?, event_sender);
 
+    if arguments.no_overlay {
+        detection_loop(event_receiver, warframe_window, db, None);
+        return Ok(());
+    }
+
+    let options = OverlayOptions {
+        geometry,
+        display_duration: Duration::from_secs_f32(arguments.overlay_duration),
+        vertical_offset: arguments.overlay_offset,
+        background: None,
+    };
+    // The overlay window has to live on the main thread, detection moves to its own thread
+    run_overlay(options, move |overlay| {
+        thread::spawn(move || detection_loop(event_receiver, warframe_window, db, Some(overlay)));
+    })?;
+    Ok(())
+}
+
+fn detection_loop(
+    event_receiver: mpsc::Receiver<()>,
+    warframe_window: Window,
+    db: Database,
+    overlay: Option<OverlayHandle>,
+) {
     while let Ok(()) = event_receiver.recv() {
         info!("Capturing");
-        run_detection(warframe_window, &db);
+        let labels = run_detection(&warframe_window, &db);
+        if let Some(overlay) = &overlay {
+            overlay.show(labels);
+        }
     }
 
     drop(OCR.lock().unwrap().take());
-    Ok(())
 }
 
 #[cfg(test)]

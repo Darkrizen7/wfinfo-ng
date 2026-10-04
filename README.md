@@ -45,6 +45,16 @@ Each item is printed to stdout along with it's platinum and ducat value in plati
 The highest value item is also indicated with a little arrow.
 When the highest value is determined by the ducat value and there is more than one item with the same ducat value, the platinum values are used as a tie breaker.
 
+# Overlay
+
+By default, prices are also shown in game: a transparent, click-through overlay is drawn over the Warframe window and displays the platinum and ducat values right above each reward's name, with the best item highlighted in gold.
+
+- `--overlay-duration <seconds>`: how long the prices stay on screen (default 20)
+- `--overlay-offset <pixels>`: distance between the prices and the item names (default 10)
+- `--no-overlay`: only print prices to the console
+
+The overlay is an X11 window (it runs through XWayland on Wayland sessions). Run the game in borderless fullscreen or windowed mode; with gamescope or exclusive fullscreen the overlay may be hidden, use `--no-overlay` there.
+
 # Issue and Workarounds
 
 - Due to buffering when the game writes the `EE.log` file, it is possible that WFInfo doesn't pick up the reward screen event until the screen has disappeared. I haven't found a way of getting around the buffered writer.

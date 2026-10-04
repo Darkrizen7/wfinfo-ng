@@ -5,17 +5,17 @@ use std::{
 };
 
 use clap::Parser;
-use eframe::egui::{CentralPanel, Color32, Context, Frame};
+use eframe::egui::{CentralPanel, Color32, Frame, Ui};
 use rdev::{EventType, Key};
 
-fn main() {
+fn main() -> eframe::Result {
     let arguments = Arguments::parse();
     let options = eframe::NativeOptions::default();
     eframe::run_native(
         "Warframe Ability Timer",
         options,
-        Box::new(|_cc| Box::<MyApp>::new(MyApp::new(arguments))),
-    );
+        Box::new(|_cc| Ok(Box::new(MyApp::new(arguments)))),
+    )
 }
 
 #[derive(Parser, Debug)]
@@ -70,8 +70,8 @@ impl MyApp {
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint();
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        ui.ctx().request_repaint();
 
         while let Ok(event) = self.event_receiver.try_recv() {
             if event.event_type == EventType::KeyPress(self.key) {
@@ -89,6 +89,6 @@ impl eframe::App for MyApp {
         };
 
         let frame = Frame::default().fill(color).inner_margin(4.0);
-        CentralPanel::default().frame(frame).show(ctx, |_ui| {});
+        CentralPanel::default().frame(frame).show(ui, |_ui| {});
     }
 }

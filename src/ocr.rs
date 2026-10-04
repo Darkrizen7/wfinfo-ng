@@ -59,7 +59,26 @@ pub fn detect_theme(image: &DynamicImage) -> Theme {
         .to_owned()
 }
 
+/// Area of a reward's name text, in pixels of the analyzed screenshot
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 pub fn extract_parts(image: &DynamicImage, theme: Theme) -> Vec<DynamicImage> {
+    extract_parts_with_rects(image, theme)
+        .into_iter()
+        .map(|(part, _rect)| part)
+        .collect()
+}
+
+pub fn extract_parts_with_rects(
+    image: &DynamicImage,
+    theme: Theme,
+) -> Vec<(DynamicImage, PartRect)> {
     image.save("input.png").unwrap();
     let screen_scaling = if image.width() * 9 > image.height() * 16 {
         image.height() as f32 / 1080.0
@@ -245,13 +264,37 @@ pub fn extract_parts(image: &DynamicImage, theme: Theme) -> Vec<DynamicImage> {
 
     // partial_screenshot.save("partial_screenshot.png").unwrap();
 
-    filter_and_separate_parts_from_part_box(partial_screenshot, theme)
+    // Same truncations as the two crops above
+    let box_left = (most_left as u32 + crop_left as u32) as f32;
+    let box_top = (most_top as u32 + crop_top as u32) as f32;
+    filter_and_separate_parts_with_rects(partial_screenshot, theme)
+        .into_iter()
+        .map(|(part, rect)| {
+            let rect = PartRect {
+                x: rect.x + box_left,
+                y: rect.y + box_top,
+                ..rect
+            };
+            (part, rect)
+        })
+        .collect()
 }
 
 pub fn filter_and_separate_parts_from_part_box(
     image: DynamicImage,
     theme: Theme,
 ) -> Vec<DynamicImage> {
+    filter_and_separate_parts_with_rects(image, theme)
+        .into_iter()
+        .map(|(part, _rect)| part)
+        .collect()
+}
+
+/// Like [`filter_and_separate_parts_from_part_box`], also returning each part's position relative to the part box
+pub fn filter_and_separate_parts_with_rects(
+    image: DynamicImage,
+    theme: Theme,
+) -> Vec<(DynamicImage, PartRect)> {
     let mut filtered = image.into_rgb8();
 
     let mut _weight = 0.0;
@@ -318,11 +361,18 @@ pub fn filter_and_separate_parts_from_part_box(
 
     let dynamic_image = DynamicImage::ImageRgb8(filtered);
     for i in 0..player_count {
-        let cropped = dynamic_image.crop_imm(curr_left + i * box_width, 0, box_width, box_height);
+        let left = curr_left + i * box_width;
+        let cropped = dynamic_image.crop_imm(left, 0, box_width, box_height);
         // cropped
         //     .save(format!("part-{}.png", i))
         //     .expect("Failed to write image");
-        images.push(cropped);
+        let rect = PartRect {
+            x: left as f32,
+            y: 0.0,
+            width: box_width as f32,
+            height: box_height as f32,
+        };
+        images.push((cropped, rect));
     }
 
     images
@@ -358,12 +408,22 @@ lazy_static! {
 }
 
 pub fn reward_image_to_reward_names(image: DynamicImage, theme: Option<Theme>) -> Vec<String> {
+    reward_image_to_reward_names_with_rects(image, theme)
+        .into_iter()
+        .map(|(name, _rect)| name)
+        .collect()
+}
+
+pub fn reward_image_to_reward_names_with_rects(
+    image: DynamicImage,
+    theme: Option<Theme>,
+) -> Vec<(String, PartRect)> {
     let theme = theme.unwrap_or_else(|| detect_theme(&image));
-    let parts = extract_parts(&image, theme);
+    let parts = extract_parts_with_rects(&image, theme);
     debug!("Extracted part images");
 
     parts
         .iter()
-        .map(|image| image_to_string(&mut OCR.lock().unwrap(), image))
+        .map(|(image, rect)| (image_to_string(&mut OCR.lock().unwrap(), image), *rect))
         .collect()
 }

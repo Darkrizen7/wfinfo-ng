@@ -7,10 +7,9 @@ use std::{
 };
 
 use eframe::{
-    egui::{self, Key},
+    egui::{self, Key, TextureHandle, TextureOptions},
     epaint::ColorImage,
 };
-use egui_extras::RetainedImage;
 use image::{io::Reader, DynamicImage, Rgb};
 use palette::{FromColor, Hsl, Srgb};
 use wfinfo::{
@@ -19,19 +18,19 @@ use wfinfo::{
     theme::{HslRange, Theme},
 };
 
-fn main() {
+fn main() -> eframe::Result {
     let options = eframe::NativeOptions::default();
     eframe::run_native(
         "Tune theme detection",
         options,
-        Box::new(|_cc| Box::<MyApp>::default()),
-    );
+        Box::new(|_cc| Ok(Box::<MyApp>::default())),
+    )
 }
 
 struct MyApp {
     original_images: Vec<DynamicImage>,
     selected_image_index: usize,
-    image: Option<RetainedImage>,
+    image: Option<TextureHandle>,
 
     ocr_request_sender: Sender<(usize, HslRange<f32>)>,
     ocr_response_receiver: Receiver<Vec<(String, String)>>,
@@ -113,9 +112,10 @@ fn spawn_ocr_thread(
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         ctx.request_repaint();
-        if ctx.input_mut().consume_key(egui::Modifiers::NONE, Key::N) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::N)) {
             self.selected_image_index =
                 (self.selected_image_index + 1) % self.original_images.len();
             self.image = None;
@@ -124,7 +124,7 @@ impl eframe::App for MyApp {
                 .unwrap();
             self.ocr_result = None;
         }
-        if ctx.input_mut().consume_key(egui::Modifiers::NONE, Key::P) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::P)) {
             self.selected_image_index =
                 (self.selected_image_index - 1) % self.original_images.len();
             self.image = None;
@@ -135,7 +135,7 @@ impl eframe::App for MyApp {
         }
         if self.image.is_none() {
             let image = self.process_image(&self.original_images[self.selected_image_index]);
-            self.image = Some(convert_image(&image));
+            self.image = Some(convert_image(&ctx, &image));
             self.ocr_request_sender
                 .send((self.selected_image_index, self.settings.clone()))
                 .unwrap();
@@ -149,20 +149,7 @@ impl eframe::App for MyApp {
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.image.as_ref() {
-            Some(image) => {
-                image.show_scaled(ui, 3.0);
-                if let Some(detections) = self.ocr_result.as_ref() {
-                    ui.label(format!("{:#?}", detections));
-                } else {
-                    ui.spinner();
-                }
-            }
-            None => {
-                ui.spinner();
-            }
-        });
-        egui::TopBottomPanel::bottom("Bottom Panel").show(ctx, |ui| {
+        egui::Panel::bottom("Bottom Panel").show(ui, |ui| {
             if ui
                 .add(
                     egui::Slider::new(&mut self.settings.saturation.start, 0.0..=1.0)
@@ -206,6 +193,19 @@ impl eframe::App for MyApp {
                     .unwrap();
                 self.ocr_result = None;
             };
+        });
+        egui::CentralPanel::default().show(ui, |ui| match self.image.as_ref() {
+            Some(image) => {
+                ui.image((image.id(), image.size_vec2() * 3.0));
+                if let Some(detections) = self.ocr_result.as_ref() {
+                    ui.label(format!("{:#?}", detections));
+                } else {
+                    ui.spinner();
+                }
+            }
+            None => {
+                ui.spinner();
+            }
         });
     }
 }
@@ -263,11 +263,10 @@ impl MyApp {
     }
 }
 
-fn convert_image(original_image: &DynamicImage) -> RetainedImage {
+fn convert_image(ctx: &egui::Context, original_image: &DynamicImage) -> TextureHandle {
     let ui_image = ColorImage::from_rgba_unmultiplied(
         [original_image.width() as _, original_image.height() as _],
         &original_image.to_rgba8(),
     );
-    RetainedImage::from_color_image("Temp", ui_image)
-        .with_texture_filter(egui::TextureFilter::Nearest)
+    ctx.load_texture("Temp", ui_image, TextureOptions::NEAREST)
 }

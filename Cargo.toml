@@ -17,8 +17,8 @@ path = "src/bin/main.rs"
 anyhow = "1.0.63"
 approx = "0.5.1"
 clap = { version = "4.5.1", features = ["derive"] }
-eframe = "0.19.0"
-egui_extras = "0.19.0"
+# X11 only: the overlay runs through XWayland so it can stay on top of the game
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11"] }
 global-hotkey = "0.4.2"
 image = "0.24.3"
 indexmap = { version = "1.9.1", features = ["serde"] }
