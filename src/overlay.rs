@@ -8,9 +8,38 @@ use eframe::egui::{
     ViewportBuilder, ViewportCommand, X11WindowType,
 };
 
-use crate::ocr::PartRect;
+use crate::{database::RelicAdvice, ocr::PartRect, wfinfo_data::item_data::Refinement};
 
 const GOLD: Color32 = Color32::from_rgb(255, 200, 60);
+const GREEN: Color32 = Color32::from_rgb(110, 220, 120);
+
+/// Something to draw above a piece of text on screen
+#[derive(Clone, Debug)]
+pub enum Label {
+    Reward(RewardLabel),
+    Relic(RelicLabel),
+}
+
+impl Label {
+    fn rect(&self) -> PartRect {
+        match self {
+            Label::Reward(label) => label.rect,
+            Label::Relic(label) => label.rect,
+        }
+    }
+}
+
+/// Value estimate and refinement advice to display above one relic
+#[derive(Clone, Debug)]
+pub struct RelicLabel {
+    /// Where the relic's name is on screen, in pixels relative to the game window
+    pub rect: PartRect,
+    /// `None` when the refinement isn't written on screen
+    pub refinement: Option<Refinement>,
+    pub advice: RelicAdvice,
+    /// Show every refinement level instead of a summary
+    pub detailed: bool,
+}
 
 /// Price information to display above one reward
 #[derive(Clone, Debug)]
@@ -84,7 +113,7 @@ pub fn run_overlay(
                 options,
                 receiver,
                 labels: Vec::new(),
-                shown_at: None,
+                expires_at: None,
                 applied_scale: None,
                 background: None,
             }))
@@ -95,13 +124,23 @@ pub fn run_overlay(
 /// Used from other threads to update the overlay
 #[derive(Clone)]
 pub struct OverlayHandle {
-    sender: Sender<Vec<RewardLabel>>,
+    sender: Sender<(Vec<Label>, bool)>,
     ctx: egui::Context,
 }
 
 impl OverlayHandle {
-    pub fn show(&self, labels: Vec<RewardLabel>) {
-        if self.sender.send(labels).is_ok() {
+    /// Replaces the labels on screen, they disappear after the configured display duration
+    pub fn show(&self, labels: Vec<Label>) {
+        self.send(labels, true);
+    }
+
+    /// Replaces the labels on screen, they stay until the next call to `show*`
+    pub fn show_until_replaced(&self, labels: Vec<Label>) {
+        self.send(labels, false);
+    }
+
+    fn send(&self, labels: Vec<Label>, expires: bool) {
+        if self.sender.send((labels, expires)).is_ok() {
             self.ctx.request_repaint();
         }
     }
@@ -109,9 +148,10 @@ impl OverlayHandle {
 
 struct OverlayApp {
     options: OverlayOptions,
-    receiver: Receiver<Vec<RewardLabel>>,
-    labels: Vec<RewardLabel>,
-    shown_at: Option<Instant>,
+    receiver: Receiver<(Vec<Label>, bool)>,
+    labels: Vec<Label>,
+    /// `None` when the labels stay until replaced
+    expires_at: Option<Instant>,
     /// Pixels per point the window geometry was last computed for
     applied_scale: Option<f32>,
     background: Option<egui::TextureHandle>,
@@ -159,38 +199,41 @@ impl eframe::App for OverlayApp {
             );
         }
 
-        while let Ok(labels) = self.receiver.try_recv() {
+        while let Ok((labels, expires)) = self.receiver.try_recv() {
             self.labels = labels;
-            self.shown_at = Some(Instant::now());
+            self.expires_at = expires.then(|| Instant::now() + self.options.display_duration);
         }
 
-        let Some(shown_at) = self.shown_at else {
-            return;
-        };
-        let elapsed = shown_at.elapsed();
-        if elapsed >= self.options.display_duration {
-            self.labels.clear();
-            self.shown_at = None;
-            return;
+        if let Some(expires_at) = self.expires_at {
+            let now = Instant::now();
+            if now >= expires_at {
+                self.labels.clear();
+                self.expires_at = None;
+                return;
+            }
+            ctx.request_repaint_after(expires_at - now);
         }
-        ctx.request_repaint_after(self.options.display_duration - elapsed);
 
         let scale = ctx.pixels_per_point();
         for (index, label) in self.labels.iter().enumerate() {
+            let rect = label.rect();
             let anchor = Pos2::new(
-                (label.rect.x + label.rect.width / 2.0) / scale,
-                (label.rect.y - self.options.vertical_offset) / scale,
+                (rect.x + rect.width / 2.0) / scale,
+                (rect.y - self.options.vertical_offset) / scale,
             );
-            egui::Area::new(egui::Id::new(("reward", index)))
+            egui::Area::new(egui::Id::new(("label", index)))
                 .fixed_pos(anchor)
                 .pivot(Align2::CENTER_BOTTOM)
                 .interactable(false)
-                .show(&ctx, |ui| draw_label(ui, label));
+                .show(&ctx, |ui| match label {
+                    Label::Reward(label) => draw_reward_label(ui, label),
+                    Label::Relic(label) => draw_relic_label(ui, label),
+                });
         }
     }
 }
 
-fn draw_label(ui: &mut egui::Ui, label: &RewardLabel) {
+fn draw_reward_label(ui: &mut egui::Ui, label: &RewardLabel) {
     let stroke = if label.best {
         Stroke::new(2.0, GOLD)
     } else {
@@ -216,10 +259,85 @@ fn draw_label(ui: &mut egui::Ui, label: &RewardLabel) {
                         .color(color),
                 );
                 ui.label(
-                    RichText::new(format!("ducats: {} p", format_platinum(label.ducats_platinum)))
-                        .size(14.0)
-                        .color(Color32::LIGHT_GRAY),
+                    RichText::new(format!(
+                        "ducats: {} p",
+                        format_platinum(label.ducats_platinum)
+                    ))
+                    .size(14.0)
+                    .color(Color32::LIGHT_GRAY),
                 );
+            });
+        });
+}
+
+fn refinement_name(refinement: Refinement) -> &'static str {
+    match refinement {
+        Refinement::Intact => "Intacte",
+        Refinement::Exceptional => "Exceptionnelle",
+        Refinement::Flawless => "Impeccable",
+        Refinement::Radiant => "Rayonnante",
+    }
+}
+
+fn draw_relic_label(ui: &mut egui::Ui, label: &RelicLabel) {
+    let advice = &label.advice;
+    let current = label.refinement.unwrap_or(Refinement::Intact);
+    let recommendation = advice.recommendation(current);
+    let stroke = if recommendation.is_some() {
+        Stroke::new(2.0, GREEN)
+    } else {
+        Stroke::new(1.0, Color32::from_gray(90))
+    };
+    Frame::new()
+        .fill(Color32::from_black_alpha(210))
+        .stroke(stroke)
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "≈ {} p",
+                        format_platinum(advice.value(current).platinum)
+                    ))
+                    .size(18.0)
+                    .strong()
+                    .color(Color32::WHITE),
+                );
+                if label.detailed {
+                    for value in advice.values {
+                        let recommended = recommendation.map(|(refinement, _)| refinement);
+                        let color = if Some(value.refinement) == recommended {
+                            GREEN
+                        } else {
+                            Color32::LIGHT_GRAY
+                        };
+                        let per_trace = if value.refinement == Refinement::Intact {
+                            String::new()
+                        } else {
+                            format!("  ({:+.3} p/trace)", value.platinum_per_trace)
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "{} : {} p{per_trace}",
+                                refinement_name(value.refinement),
+                                format_platinum(value.platinum)
+                            ))
+                            .size(13.0)
+                            .color(color),
+                        );
+                    }
+                }
+                let advice_text = if let Some((refinement, per_trace)) = recommendation {
+                    RichText::new(format!(
+                        "Raffiner → {} ({per_trace:+.3} p/trace)",
+                        refinement_name(refinement),
+                    ))
+                    .color(GREEN)
+                } else {
+                    RichText::new("Pas la peine de raffiner").color(Color32::GRAY)
+                };
+                ui.label(advice_text.size(12.0));
             });
         });
 }

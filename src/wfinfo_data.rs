@@ -44,7 +44,7 @@ pub mod item_data {
         pub parts: HashMap<String, DucatItem>,
     }
 
-    #[derive(Copy, Clone, Debug)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub enum Refinement {
         Intact,
         Exceptional,
@@ -84,6 +84,23 @@ pub mod item_data {
     }
 
     impl Refinement {
+        pub const ALL: [Refinement; 4] = [
+            Refinement::Intact,
+            Refinement::Exceptional,
+            Refinement::Flawless,
+            Refinement::Radiant,
+        ];
+
+        /// Void Traces needed to refine an intact relic to this level
+        pub fn trace_cost(&self) -> u32 {
+            match self {
+                Refinement::Intact => 0,
+                Refinement::Exceptional => 25,
+                Refinement::Flawless => 50,
+                Refinement::Radiant => 100,
+            }
+        }
+
         pub fn common_chance(&self) -> f32 {
             match self {
                 Refinement::Intact => 0.2533,

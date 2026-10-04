@@ -23,16 +23,88 @@ use wfinfo::{
         normalize_string, reward_image_to_reward_names, reward_image_to_reward_names_with_rects,
         OCR,
     },
-    overlay::{run_overlay, OverlayHandle, OverlayOptions, RewardLabel, WindowGeometry},
+    overlay::{
+        run_overlay, Label, OverlayHandle, OverlayOptions, RelicLabel, RewardLabel, WindowGeometry,
+    },
+    relic_detection::find_relics,
     utils::fetch_prices_and_items,
+    wfinfo_data::item_data::Refinement,
 };
 
-fn run_detection(capturer: &Window, db: &Database) -> Vec<RewardLabel> {
+/// What to look for on screen
+#[derive(Clone, Copy, Debug)]
+enum Trigger {
+    /// Relic reward choice at the end of a fissure
+    Rewards,
+    /// Relic selection or refinement screen
+    Relics,
+}
+
+fn run_detection(
+    capturer: &Window,
+    db: &Database,
+    trigger: Trigger,
+    trace_threshold: f32,
+) -> Vec<Label> {
     let frame = capturer.capture_image().unwrap();
     info!("Captured");
     let image = DynamicImage::ImageRgba8(frame);
     info!("Converted");
-    detect_rewards(image, db)
+    detect(image, db, trigger, trace_threshold)
+}
+
+fn detect(
+    image: DynamicImage,
+    db: &Database,
+    trigger: Trigger,
+    trace_threshold: f32,
+) -> Vec<Label> {
+    match trigger {
+        Trigger::Rewards => detect_rewards(image, db)
+            .into_iter()
+            .map(Label::Reward)
+            .collect(),
+        Trigger::Relics => detect_relics(image, db, trace_threshold)
+            .into_iter()
+            .map(Label::Relic)
+            .collect(),
+    }
+}
+
+fn detect_relics(image: DynamicImage, db: &Database, trace_threshold: f32) -> Vec<RelicLabel> {
+    let relics = find_relics(&image, db);
+    if relics.is_empty() {
+        warn!("No relic found on screen");
+    }
+    // A single relic on screen has room for details, otherwise only the selected one does
+    let single = relics.len() == 1;
+    relics
+        .into_iter()
+        .map(|relic| {
+            let relic_data = &db.relics_of_era(relic.era).unwrap()[&relic.code];
+            let advice = db.refinement_advice(relic_data, relic.era, trace_threshold);
+            let current = relic.refinement.unwrap_or(Refinement::Intact);
+            let values: Vec<_> = advice
+                .values
+                .iter()
+                .map(|value| format!("{:?} {:.1}", value.refinement, value.platinum))
+                .collect();
+            info!(
+                "{} {} ({:?})\n\t{}\n\trefine: {:?}",
+                relic.era,
+                relic.code,
+                relic.refinement,
+                values.join("\t"),
+                advice.recommendation(current)
+            );
+            RelicLabel {
+                rect: relic.rect,
+                refinement: relic.refinement,
+                advice,
+                detailed: single || relic.selected,
+            }
+        })
+        .collect()
 }
 
 fn detect_rewards(image: DynamicImage, db: &Database) -> Vec<RewardLabel> {
@@ -83,7 +155,7 @@ fn detect_rewards(image: DynamicImage, db: &Database) -> Vec<RewardLabel> {
         .collect()
 }
 
-fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
+fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<Trigger>) {
     debug!("Path: {}", path.display());
     let mut position = File::open(&path)
         .unwrap_or_else(|_| panic!("Couldn't open file {}", path.display()))
@@ -128,7 +200,7 @@ fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
                     if reward_screen_detected {
                         info!("Detected, waiting...");
                         sleep(Duration::from_millis(1500));
-                        event_sender.send(()).unwrap();
+                        event_sender.send(Trigger::Rewards).unwrap();
                     }
 
                     position = f.metadata().unwrap().len();
@@ -143,16 +215,23 @@ fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
     });
 }
 
-fn hotkey_watcher(hotkey: HotKey, event_sender: mpsc::Sender<()>) {
-    debug!("watching hotkey: {hotkey:?}");
+fn hotkey_watcher(hotkeys: Vec<(HotKey, Trigger)>, event_sender: mpsc::Sender<Trigger>) {
+    debug!("watching hotkeys: {hotkeys:?}");
     thread::spawn(move || {
         let manager = GlobalHotKeyManager::new().unwrap();
-        manager.register(hotkey).unwrap();
+        for (hotkey, _trigger) in &hotkeys {
+            manager.register(*hotkey).unwrap();
+        }
 
         while let Ok(event) = GlobalHotKeyEvent::receiver().recv() {
             debug!("{:?}", event);
-            if event.state == HotKeyState::Pressed {
-                event_sender.send(()).unwrap();
+            if event.state != HotKeyState::Pressed {
+                continue;
+            }
+            if let Some((_hotkey, trigger)) =
+                hotkeys.iter().find(|(hotkey, _)| hotkey.id() == event.id)
+            {
+                event_sender.send(*trigger).unwrap();
             }
         }
     });
@@ -194,9 +273,18 @@ struct Arguments {
     /// Vertical distance in pixels between the prices and the item names
     #[arg(long, default_value_t = 10.0)]
     overlay_offset: f32,
+    /// Minimum platinum gained per Void Trace for a relic refinement to be recommended
+    #[arg(long, default_value_t = 0.025)]
+    trace_threshold: f32,
+    /// Hotkey to analyze the relics on screen (selection or refinement screen)
+    #[arg(long, default_value = "F11")]
+    relic_hotkey: String,
     /// Analyze this screenshot instead of watching the game (for testing the overlay)
     #[arg(long, hide = true)]
     test_image: Option<PathBuf>,
+    /// Treat the test image as a relic screen instead of a reward screen
+    #[arg(long, hide = true)]
+    test_relics: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -231,7 +319,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             [image.width() as usize, image.height() as usize],
             &image.to_rgba8(),
         );
-        let labels = detect_rewards(image, &db);
+        let trigger = if arguments.test_relics {
+            Trigger::Relics
+        } else {
+            Trigger::Rewards
+        };
+        let labels = detect(image, &db, trigger, arguments.trace_threshold);
         drop(OCR.lock().unwrap().take());
         if arguments.no_overlay {
             return Ok(());
@@ -267,10 +360,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (event_sender, event_receiver) = channel();
 
     log_watcher(log_path, event_sender.clone());
-    hotkey_watcher("F12".parse()?, event_sender);
+    hotkey_watcher(
+        vec![
+            ("F12".parse()?, Trigger::Rewards),
+            (arguments.relic_hotkey.parse()?, Trigger::Relics),
+        ],
+        event_sender,
+    );
 
+    let trace_threshold = arguments.trace_threshold;
     if arguments.no_overlay {
-        detection_loop(event_receiver, warframe_window, db, None);
+        detection_loop(event_receiver, warframe_window, db, trace_threshold, None);
         return Ok(());
     }
 
@@ -282,22 +382,35 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     // The overlay window has to live on the main thread, detection moves to its own thread
     run_overlay(options, move |overlay| {
-        thread::spawn(move || detection_loop(event_receiver, warframe_window, db, Some(overlay)));
+        thread::spawn(move || {
+            detection_loop(
+                event_receiver,
+                warframe_window,
+                db,
+                trace_threshold,
+                Some(overlay),
+            )
+        });
     })?;
     Ok(())
 }
 
 fn detection_loop(
-    event_receiver: mpsc::Receiver<()>,
+    event_receiver: mpsc::Receiver<Trigger>,
     warframe_window: Window,
     db: Database,
+    trace_threshold: f32,
     overlay: Option<OverlayHandle>,
 ) {
-    while let Ok(()) = event_receiver.recv() {
-        info!("Capturing");
-        let labels = run_detection(&warframe_window, &db);
-        if let Some(overlay) = &overlay {
-            overlay.show(labels);
+    while let Ok(trigger) = event_receiver.recv() {
+        info!("Capturing ({trigger:?})");
+        let labels = run_detection(&warframe_window, &db, trigger, trace_threshold);
+        match (&overlay, trigger) {
+            (Some(overlay), Trigger::Rewards) => overlay.show(labels),
+            // Relic estimates stay until the hotkey is pressed again: it updates them, or
+            // clears them when no relic is on screen anymore
+            (Some(overlay), Trigger::Relics) => overlay.show_until_replaced(labels),
+            (None, _) => {}
         }
     }
 

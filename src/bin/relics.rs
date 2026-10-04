@@ -71,6 +71,30 @@ fn best_trace_dump(database: &Database) {
         .for_each(|(name, value)| println!("{}:  \t{}", name, value));
 }
 
+fn advice_dump(database: &Database, era: &str, trace_threshold: f32) {
+    let relics = database.relics_of_era(era).expect("Invalid relic era");
+    let mut names: Vec<_> = relics.keys().collect();
+    names.sort();
+    for name in names {
+        let advice = database.refinement_advice(&relics[name], era, trace_threshold);
+        let values: Vec<_> = advice
+            .values
+            .iter()
+            .map(|value| {
+                format!(
+                    "{:.1} ({:+.3}/trace)",
+                    value.platinum, value.platinum_per_trace
+                )
+            })
+            .collect();
+        let recommendation = advice.recommendation(Refinement::Intact);
+        println!(
+            "{era} {name}:\t{}\t-> {recommendation:?}",
+            values.join("\t")
+        );
+    }
+}
+
 fn main() {
     let database = Database::load_from_file(None, None);
     let mut args = std::env::args().skip(1);
@@ -86,6 +110,14 @@ fn main() {
         "axi" => &database.relics.axi,
         "tracedump" => {
             best_trace_dump(&database);
+            return;
+        }
+        "advice" => {
+            let era = args.next().expect("No relic era provided");
+            let threshold = args
+                .next()
+                .map_or(0.1, |t| t.parse().expect("Invalid threshold"));
+            advice_dump(&database, &era, threshold);
             return;
         }
         s => panic!("Invalid relic type: {s}"),

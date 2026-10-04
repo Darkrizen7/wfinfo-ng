@@ -55,6 +55,19 @@ By default, prices are also shown in game: a transparent, click-through overlay 
 
 The overlay is an X11 window (it runs through XWayland on Wayland sessions). Run the game in borderless fullscreen or windowed mode; with gamescope or exclusive fullscreen the overlay may be hidden, use `--no-overlay` there.
 
+# Relic values and refinement advice
+
+On the Void Relics screen (relic selection before a fissure, or refinement), press `F11` to show above each relic:
+
+- its estimated value in platinum,
+- whether refining it is worth the Void Traces, and up to which refinement.
+
+The selected relic also gets the value at every refinement level. Press `F11` again to update the estimates (after scrolling or changing era) or to remove them once you left the screen.
+
+Values assume a public squad: you get the best of your reward and the rewards of three players opening random intact relics of the same era.
+A refinement is recommended when it gains at least `--trace-threshold` platinum per Void Trace (default 0.025).
+Use `--relic-hotkey` to pick another key. `relics advice <era> [threshold]` prints the same numbers for every relic of an era.
+
 # Issue and Workarounds
 
 - Due to buffering when the game writes the `EE.log` file, it is possible that WFInfo doesn't pick up the reward screen event until the screen has disappeared. I haven't found a way of getting around the buffered writer.

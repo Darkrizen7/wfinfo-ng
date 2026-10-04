@@ -43,6 +43,50 @@ impl Bucket {
 
         total_expectation
     }
+
+    /// Probability that a draw from this bucket is worth at most `value`
+    fn cdf(&self, value: f32) -> f32 {
+        self.items
+            .iter()
+            .filter(|item| item.value <= value)
+            .map(|item| item.probability)
+            .sum()
+    }
+
+    /// Uniform mixture of several buckets, e.g. "a random relic of this era"
+    pub fn mixture(buckets: &[Bucket]) -> Self {
+        let weight = 1.0 / buckets.len() as f32;
+        Self::new(
+            buckets
+                .iter()
+                .flat_map(|bucket| bucket.items.iter())
+                .map(|item| Item {
+                    value: item.value,
+                    probability: item.probability * weight,
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Expected value of the best of one independent draw from each bucket
+pub fn expectation_of_best(buckets: &[&Bucket]) -> f32 {
+    let mut values: Vec<f32> = buckets
+        .iter()
+        .flat_map(|bucket| bucket.items.iter().map(|item| item.value))
+        .collect();
+    values.sort_by(|a, b| a.total_cmp(b));
+    values.dedup();
+
+    let mut total_expectation = 0.0;
+    let mut previous_probability = 0.0;
+    for value in values {
+        let cumulative_probability: f32 = buckets.iter().map(|bucket| bucket.cdf(value)).product();
+        total_expectation += (cumulative_probability - previous_probability) * value;
+        previous_probability = cumulative_probability;
+    }
+
+    total_expectation
 }
 
 #[cfg(test)]
@@ -71,6 +115,24 @@ mod test {
         let bucket = Bucket::new(uniform(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
         let value = bucket.expectation_of_best_of_n(2);
         assert_relative_eq!(value, 161.0 / 36.0);
+    }
+
+    #[test]
+    fn best_of_identical_buckets_matches_best_of_n() {
+        let bucket = Bucket::new(uniform(vec![1.0, 2.0, 2.0, 5.0, 8.0, 13.0]));
+        assert_relative_eq!(
+            expectation_of_best(&[&bucket, &bucket, &bucket, &bucket]),
+            bucket.expectation_of_best_of_n(4),
+            epsilon = 1e-4
+        );
+    }
+
+    #[test]
+    fn best_of_different_buckets() {
+        let die = Bucket::new(uniform(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+        let coin = Bucket::new(uniform(vec![0.0, 10.0]));
+        // Half the time the coin gives 10, otherwise the die decides
+        assert_relative_eq!(expectation_of_best(&[&die, &coin]), 0.5 * 10.0 + 0.5 * 3.5);
     }
 
     #[test]

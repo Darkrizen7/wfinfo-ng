@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs::read_to_string, path::Path};
 
 use levenshtein::levenshtein;
+use log::warn;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -16,6 +17,53 @@ use crate::{
 pub struct Database {
     items: Vec<Item>,
     pub relics: Relics,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RefinementValue {
+    pub refinement: Refinement,
+    /// Expected platinum in a public squad
+    pub platinum: f32,
+    /// Platinum gained per Void Trace compared to opening the relic intact
+    pub platinum_per_trace: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RelicAdvice {
+    /// One entry per refinement, from intact to radiant
+    pub values: [RefinementValue; 4],
+    /// Minimum platinum per Void Trace for a refinement to be worth it
+    pub trace_threshold: f32,
+}
+
+impl RelicAdvice {
+    pub fn value(&self, refinement: Refinement) -> RefinementValue {
+        self.values[Refinement::ALL
+            .iter()
+            .position(|r| *r == refinement)
+            .unwrap()]
+    }
+
+    /// Best refinement to reach from `current`, with the platinum gained per trace spent,
+    /// or `None` if no refinement is worth its traces
+    pub fn recommendation(&self, current: Refinement) -> Option<(Refinement, f32)> {
+        let current = self.value(current);
+        let per_trace = |value: &RefinementValue| {
+            (value.platinum - current.platinum)
+                / (value.refinement.trace_cost() - current.refinement.trace_cost()) as f32
+        };
+        self.values
+            .iter()
+            .filter(|value| value.refinement.trace_cost() > current.refinement.trace_cost())
+            .max_by(|a, b| {
+                let score = |value: &RefinementValue| {
+                    value.platinum - self.trace_threshold * value.refinement.trace_cost() as f32
+                };
+                score(a).total_cmp(&score(b))
+            })
+            .filter(|value| per_trace(value) > self.trace_threshold)
+            .map(|value| (value.refinement, per_trace(value)))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -141,14 +189,85 @@ impl Database {
         let items = item_names
             .into_iter()
             .map(|(name, chance)| statistics::Item {
-                value: self
-                    .find_item_exact(name)
-                    .unwrap_or_else(|| panic!("Failed to find item {} in database", name))
-                    .platinum,
+                value: match self.find_item_exact(name) {
+                    Some(item) => item.platinum,
+                    None => {
+                        warn!("Failed to find item {name} in database");
+                        0.0
+                    }
+                },
                 probability: chance,
             })
             .collect();
         Bucket::new(items)
+    }
+
+    /// Relics of one era ("Lith", "Meso", "Neo" or "Axi", case insensitive)
+    pub fn relics_of_era(&self, era: &str) -> Option<&HashMap<String, Relic>> {
+        match era.to_lowercase().as_str() {
+            "lith" => Some(&self.relics.lith),
+            "meso" => Some(&self.relics.meso),
+            "neo" => Some(&self.relics.neo),
+            "axi" => Some(&self.relics.axi),
+            _ => None,
+        }
+    }
+
+    /// Rewards of a random intact relic of this era, preferring relics that still drop
+    fn era_bucket(&self, era: &str) -> Bucket {
+        let relics = self.relics_of_era(era).expect("Invalid relic era");
+        let mut buckets: Vec<_> = relics
+            .values()
+            .filter(|relic| !relic.vaulted)
+            .map(|relic| self.relic_to_bucket(relic, Refinement::Intact))
+            .collect();
+        if buckets.is_empty() {
+            buckets = relics
+                .values()
+                .map(|relic| self.relic_to_bucket(relic, Refinement::Intact))
+                .collect();
+        }
+        Bucket::mixture(&buckets)
+    }
+
+    /// Expected platinum of the reward picked in a public squad: the best of this relic's
+    /// reward and the rewards of three other players opening random intact relics of the same era
+    pub fn public_relic_value(&self, relic: &Relic, era: &str, refinement: Refinement) -> f32 {
+        self.public_relic_value_against(relic, refinement, &self.era_bucket(era))
+    }
+
+    fn public_relic_value_against(
+        &self,
+        relic: &Relic,
+        refinement: Refinement,
+        others: &Bucket,
+    ) -> f32 {
+        let own = self.relic_to_bucket(relic, refinement);
+        statistics::expectation_of_best(&[&own, others, others, others])
+    }
+
+    /// Value of a relic at each refinement and which refinement is worth its Void Traces.
+    ///
+    /// A refinement is only recommended when it gains more than `trace_threshold` platinum per trace.
+    pub fn refinement_advice(&self, relic: &Relic, era: &str, trace_threshold: f32) -> RelicAdvice {
+        let others = self.era_bucket(era);
+        let values = Refinement::ALL.map(|refinement| RefinementValue {
+            refinement,
+            platinum: self.public_relic_value_against(relic, refinement, &others),
+            platinum_per_trace: 0.0,
+        });
+        let intact = values[0].platinum;
+        let values = values.map(|value| RefinementValue {
+            platinum_per_trace: match value.refinement.trace_cost() {
+                0 => 0.0,
+                cost => (value.platinum - intact) / cost as f32,
+            },
+            ..value
+        });
+        RelicAdvice {
+            values,
+            trace_threshold,
+        }
     }
 
     pub fn single_relic_value(&self, relic: &Relic, refinement: Refinement) -> f32 {
