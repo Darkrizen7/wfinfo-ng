@@ -9,6 +9,9 @@ pub mod price_data {
         pub name: String,
         #[serde(deserialize_with = "deserialize_number_from_string")]
         pub custom_avg: f32,
+        /// Number of trades on the previous day
+        #[serde(default, deserialize_with = "deserialize_number_from_string")]
+        pub yesterday_vol: f32,
     }
 }
 
@@ -21,6 +24,9 @@ pub mod item_data {
     pub struct DucatItem {
         #[serde(default)]
         pub ducats: usize,
+        /// No longer dropped by any relic currently in the drop tables
+        #[serde(default)]
+        pub vaulted: bool,
     }
 
     #[derive(Clone, Debug, Deserialize)]

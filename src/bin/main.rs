@@ -4,7 +4,7 @@ use std::{error::Error, str::FromStr};
 use std::{fs::File, thread};
 use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    sync::mpsc::channel,
+    sync::mpsc::{channel, RecvTimeoutError},
 };
 use std::{path::PathBuf, sync::mpsc};
 
@@ -13,6 +13,7 @@ use eframe::egui::ColorImage;
 use env_logger::{Builder, Env};
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use image::DynamicImage;
+use levenshtein::levenshtein;
 use log::{debug, error, info, warn};
 use notify::{watcher, RecursiveMode, Watcher};
 use xcap::Window;
@@ -27,7 +28,9 @@ use wfinfo::{
         run_overlay, Label, OverlayHandle, OverlayOptions, RelicLabel, RewardLabel, WindowGeometry,
     },
     relic_detection::find_relics,
-    utils::fetch_prices_and_items,
+    screen_text,
+    snapit::find_items,
+    utils::{fetch_official_relics, fetch_prices_and_items},
     wfinfo_data::item_data::Refinement,
 };
 
@@ -38,19 +41,14 @@ enum Trigger {
     Rewards,
     /// Relic selection or refinement screen
     Relics,
+    /// Prime parts anywhere on screen, e.g. in the inventory
+    Items,
 }
 
-fn run_detection(
-    capturer: &Window,
-    db: &Database,
-    trigger: Trigger,
-    trace_threshold: f32,
-) -> Vec<Label> {
+fn capture(capturer: &Window) -> DynamicImage {
     let frame = capturer.capture_image().unwrap();
     info!("Captured");
-    let image = DynamicImage::ImageRgba8(frame);
-    info!("Converted");
-    detect(image, db, trigger, trace_threshold)
+    DynamicImage::ImageRgba8(frame)
 }
 
 fn detect(
@@ -68,7 +66,41 @@ fn detect(
             .into_iter()
             .map(Label::Relic)
             .collect(),
+        Trigger::Items => detect_items(image, db)
+            .into_iter()
+            .map(Label::Reward)
+            .collect(),
     }
+}
+
+fn detect_items(image: DynamicImage, db: &Database) -> Vec<RewardLabel> {
+    let items = find_items(&image, db);
+    if items.is_empty() {
+        warn!("No prime part found on screen");
+    }
+    items
+        .into_iter()
+        .map(|found| {
+            let item = found.item;
+            info!(
+                "{}\n\t{}\t{}\t{} sold yesterday{}",
+                item.drop_name,
+                item.platinum,
+                item.ducats as f32 / 10.0,
+                item.volume,
+                if item.vaulted { "\tvaulted" } else { "" }
+            );
+            RewardLabel {
+                rect: found.rect,
+                name: Some(item.drop_name.clone()),
+                platinum: item.platinum,
+                ducats_platinum: item.ducats as f32 / 10.0,
+                volume: item.volume,
+                vaulted: item.vaulted,
+                best: false,
+            }
+        })
+        .collect()
 }
 
 fn detect_relics(image: DynamicImage, db: &Database, trace_threshold: f32) -> Vec<RelicLabel> {
@@ -81,7 +113,15 @@ fn detect_relics(image: DynamicImage, db: &Database, trace_threshold: f32) -> Ve
     relics
         .into_iter()
         .map(|relic| {
-            let relic_data = &db.relics_of_era(relic.era).unwrap()[&relic.code];
+            let Some(relic_data) = db.relics_of_era(relic.era).unwrap().get(&relic.code) else {
+                warn!("{} {}\n\tUnknown drops", relic.era, relic.code);
+                return RelicLabel {
+                    rect: relic.rect,
+                    refinement: relic.refinement,
+                    advice: None,
+                    detailed: false,
+                };
+            };
             let advice = db.refinement_advice(relic_data, relic.era, trace_threshold);
             let current = relic.refinement.unwrap_or(Refinement::Intact);
             let values: Vec<_> = advice
@@ -100,7 +140,7 @@ fn detect_relics(image: DynamicImage, db: &Database, trace_threshold: f32) -> Ve
             RelicLabel {
                 rect: relic.rect,
                 refinement: relic.refinement,
-                advice,
+                advice: Some(advice),
                 detailed: single || relic.selected,
             }
         })
@@ -130,10 +170,12 @@ fn detect_rewards(image: DynamicImage, db: &Database) -> Vec<RewardLabel> {
     for (index, item) in items.iter().enumerate() {
         if let Some(item) = item {
             info!(
-                "{}\n\t{}\t{}\t{}",
+                "{}\n\t{}\t{}\t{} sold yesterday{}\t{}",
                 item.drop_name,
                 item.platinum,
                 item.ducats as f32 / 10.0,
+                item.volume,
+                if item.vaulted { "\tvaulted" } else { "" },
                 if Some(index) == best { "<----" } else { "" }
             );
         } else {
@@ -150,6 +192,8 @@ fn detect_rewards(image: DynamicImage, db: &Database) -> Vec<RewardLabel> {
             name: item.map(|item| item.drop_name.clone()),
             platinum: item.map_or(0.0, |item| item.platinum),
             ducats_platinum: item.map_or(0.0, |item| item.ducats as f32 / 10.0),
+            volume: item.map_or(0.0, |item| item.volume),
+            vaulted: item.is_some_and(|item| item.vaulted),
             best: item.is_some() && Some(index) == best,
         })
         .collect()
@@ -279,12 +323,21 @@ struct Arguments {
     /// Hotkey to analyze the relics on screen (selection or refinement screen)
     #[arg(long, default_value = "F11")]
     relic_hotkey: String,
+    /// Hotkey to price every prime part on screen, e.g. in the inventory
+    #[arg(long, default_value = "F10")]
+    snapit_hotkey: String,
     /// Analyze this screenshot instead of watching the game (for testing the overlay)
     #[arg(long, hide = true)]
     test_image: Option<PathBuf>,
     /// Treat the test image as a relic screen instead of a reward screen
     #[arg(long, hide = true)]
     test_relics: bool,
+    /// Look for prime parts anywhere in the test image instead of a reward screen
+    #[arg(long, hide = true)]
+    test_snapit: bool,
+    /// Print the screen title read from the test image
+    #[arg(long, hide = true)]
+    test_title: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -302,13 +355,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         .format_target(false)
         .init();
 
+    // Ready before the first F10/F11 press
+    thread::spawn(screen_text::warm_up);
+
     let (prices, items) = fetch_prices_and_items()?;
-    let db = Database::load_from_file(Some(&prices), Some(&items));
+    let mut db = Database::load_from_file(Some(&prices), Some(&items));
+    match fetch_official_relics().and_then(|path| db.load_official_relics(&path)) {
+        Ok(()) => {}
+        Err(err) => warn!("Using relic data from WFInfo only: {err:#}"),
+    }
 
     info!("Loaded database");
 
     if let Some(test_image) = arguments.test_image {
         let image = image::open(test_image)?;
+        if arguments.test_title {
+            println!("Title: {:?}", screen_text::read_title(&image));
+            screen_text::shut_down();
+            return Ok(());
+        }
         let geometry = WindowGeometry {
             x: 0,
             y: 0,
@@ -321,11 +386,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         let trigger = if arguments.test_relics {
             Trigger::Relics
+        } else if arguments.test_snapit {
+            Trigger::Items
         } else {
             Trigger::Rewards
         };
         let labels = detect(image, &db, trigger, arguments.trace_threshold);
         drop(OCR.lock().unwrap().take());
+        screen_text::shut_down();
         if arguments.no_overlay {
             return Ok(());
         }
@@ -364,6 +432,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         vec![
             ("F12".parse()?, Trigger::Rewards),
             (arguments.relic_hotkey.parse()?, Trigger::Relics),
+            (arguments.snapit_hotkey.parse()?, Trigger::Items),
         ],
         event_sender,
     );
@@ -395,6 +464,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// How often the screen title is checked while relic or item estimates are shown
+const TITLE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// Consecutive different titles before the estimates are removed, to ignore short popups
+const TITLE_CHANGES_TO_CLOSE: u32 = 2;
+
+/// Fuzzy title comparison, the spaced out capitals of titles are often misread
+fn same_title(reference: &str, current: &str) -> bool {
+    levenshtein(reference, current) <= (reference.len() / 3).max(3)
+}
+
+/// Screen the shown estimates belong to, to remove them once the player leaves it
+struct WatchedScreen {
+    title: String,
+    changes: u32,
+}
+
 fn detection_loop(
     event_receiver: mpsc::Receiver<Trigger>,
     warframe_window: Window,
@@ -402,19 +487,52 @@ fn detection_loop(
     trace_threshold: f32,
     overlay: Option<OverlayHandle>,
 ) {
-    while let Ok(trigger) = event_receiver.recv() {
+    let mut watched: Option<WatchedScreen> = None;
+    loop {
+        let trigger = match event_receiver.recv_timeout(TITLE_CHECK_INTERVAL) {
+            Ok(trigger) => trigger,
+            Err(RecvTimeoutError::Timeout) => {
+                let (Some(overlay), Some(screen)) = (&overlay, &mut watched) else {
+                    continue;
+                };
+                let title = screen_text::read_title(&capture(&warframe_window));
+                if same_title(&screen.title, &title) {
+                    screen.changes = 0;
+                    continue;
+                }
+                screen.changes += 1;
+                debug!("Screen title changed: {:?} -> {title:?}", screen.title);
+                if screen.changes >= TITLE_CHANGES_TO_CLOSE {
+                    info!("Left the screen, removing estimates");
+                    overlay.show_until_replaced(Vec::new());
+                    watched = None;
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+
         info!("Capturing ({trigger:?})");
-        let labels = run_detection(&warframe_window, &db, trigger, trace_threshold);
-        match (&overlay, trigger) {
-            (Some(overlay), Trigger::Rewards) => overlay.show(labels),
-            // Relic estimates stay until the hotkey is pressed again: it updates them, or
-            // clears them when no relic is on screen anymore
-            (Some(overlay), Trigger::Relics) => overlay.show_until_replaced(labels),
-            (None, _) => {}
+        let image = capture(&warframe_window);
+        let title = screen_text::read_title(&image);
+        let labels = detect(image, &db, trigger, trace_threshold);
+        let Some(overlay) = &overlay else {
+            continue;
+        };
+        match trigger {
+            Trigger::Rewards => overlay.show(labels),
+            // Relic and item estimates stay while the player is on the same screen, the hotkey
+            // updates them, or clears them when nothing is found anymore
+            Trigger::Relics | Trigger::Items => {
+                watched = (!labels.is_empty() && !title.is_empty())
+                    .then(|| WatchedScreen { title, changes: 0 });
+                overlay.show_until_replaced(labels)
+            }
         }
     }
 
     drop(OCR.lock().unwrap().take());
+    screen_text::shut_down();
 }
 
 #[cfg(test)]
@@ -431,6 +549,16 @@ mod test {
     use wfinfo::testing::Label;
 
     use super::*;
+
+    #[test]
+    fn title_comparison() {
+        // Titles as read from real screenshots
+        assert!(same_title("voidrelicsrefinement", "vidrelicsrefinements"));
+        assert!(same_title("inventorysell", "inventorysell"));
+        assert!(!same_title("voidrelicsrefinement", "inventorysell"));
+        assert!(!same_title("inventorysell", ""));
+        assert!(!same_title("voidrelicsrefinement", "aeifvifissurerewards"));
+    }
 
     #[test]
     fn single_image() {

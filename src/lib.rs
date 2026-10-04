@@ -2,6 +2,8 @@ pub mod database;
 pub mod ocr;
 pub mod overlay;
 pub mod relic_detection;
+pub mod screen_text;
+pub mod snapit;
 pub mod statistics;
 pub mod testing;
 pub mod theme;

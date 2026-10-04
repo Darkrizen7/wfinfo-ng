@@ -8,10 +8,17 @@ use eframe::egui::{
     ViewportBuilder, ViewportCommand, X11WindowType,
 };
 
+use eframe::egui::text::{LayoutJob, TextFormat};
+use eframe::egui::FontId;
+
 use crate::{database::RelicAdvice, ocr::PartRect, wfinfo_data::item_data::Refinement};
 
 const GOLD: Color32 = Color32::from_rgb(255, 200, 60);
 const GREEN: Color32 = Color32::from_rgb(110, 220, 120);
+const ORANGE: Color32 = Color32::from_rgb(255, 150, 70);
+
+/// Below this many trades a day, an item may take a while to sell
+const LOW_VOLUME: f32 = 5.0;
 
 /// Something to draw above a piece of text on screen
 #[derive(Clone, Debug)]
@@ -36,7 +43,8 @@ pub struct RelicLabel {
     pub rect: PartRect,
     /// `None` when the refinement isn't written on screen
     pub refinement: Option<Refinement>,
-    pub advice: RelicAdvice,
+    /// `None` when the relic's drops are missing from the downloaded data
+    pub advice: Option<RelicAdvice>,
     /// Show every refinement level instead of a summary
     pub detailed: bool,
 }
@@ -51,6 +59,9 @@ pub struct RewardLabel {
     pub platinum: f32,
     /// Ducat value converted to platinum
     pub ducats_platinum: f32,
+    /// Number of trades on the previous day
+    pub volume: f32,
+    pub vaulted: bool,
     pub best: bool,
 }
 
@@ -266,6 +277,22 @@ fn draw_reward_label(ui: &mut egui::Ui, label: &RewardLabel) {
                     .size(14.0)
                     .color(Color32::LIGHT_GRAY),
                 );
+                let volume_color = if label.volume < LOW_VOLUME {
+                    ORANGE
+                } else {
+                    Color32::LIGHT_GRAY
+                };
+                let mut details = LayoutJob::default();
+                let format = |color| TextFormat::simple(FontId::proportional(12.0), color);
+                details.append(
+                    &format!("{} ventes/j", label.volume),
+                    0.0,
+                    format(volume_color),
+                );
+                if label.vaulted {
+                    details.append(" · vaulté", 0.0, format(GOLD));
+                }
+                ui.label(details);
             });
         });
 }
@@ -280,7 +307,29 @@ fn refinement_name(refinement: Refinement) -> &'static str {
 }
 
 fn draw_relic_label(ui: &mut egui::Ui, label: &RelicLabel) {
-    let advice = &label.advice;
+    let Some(advice) = &label.advice else {
+        Frame::new()
+            .fill(Color32::from_black_alpha(210))
+            .stroke(Stroke::new(1.0, Color32::from_gray(90)))
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("? p")
+                            .size(18.0)
+                            .strong()
+                            .color(Color32::GRAY),
+                    );
+                    ui.label(
+                        RichText::new("Contenu inconnu")
+                            .size(12.0)
+                            .color(Color32::GRAY),
+                    );
+                });
+            });
+        return;
+    };
     let current = label.refinement.unwrap_or(Refinement::Intact);
     let recommendation = advice.recommendation(current);
     let stroke = if recommendation.is_some() {

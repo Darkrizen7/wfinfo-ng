@@ -1,7 +1,11 @@
-use std::{collections::HashMap, fs::read_to_string, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::read_to_string,
+    path::Path,
+};
 
 use levenshtein::levenshtein;
-use log::warn;
+use log::{info, warn};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -17,6 +21,31 @@ use crate::{
 pub struct Database {
     items: Vec<Item>,
     pub relics: Relics,
+    /// Relics whose drop table is incomplete in the downloaded data, as (era, code)
+    #[serde(default)]
+    pub incomplete_relics: HashSet<(String, String)>,
+}
+
+#[derive(Deserialize)]
+struct OfficialRelics {
+    relics: Vec<OfficialRelic>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OfficialRelic {
+    tier: String,
+    /// Missing for Requiem relics
+    relic_name: Option<String>,
+    state: String,
+    rewards: Vec<OfficialReward>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OfficialReward {
+    item_name: String,
+    chance: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +101,11 @@ pub struct Item {
     pub drop_name: String,
     pub platinum: f32,
     pub ducats: usize,
+    /// Number of trades on the previous day
+    #[serde(default)]
+    pub volume: f32,
+    #[serde(default)]
+    pub vaulted: bool,
 }
 
 impl Database {
@@ -79,9 +113,9 @@ impl Database {
         // download file from: https://api.warframestat.us/wfinfo/prices
         let text = read_to_string(prices.unwrap_or_else(|| Path::new("prices.json"))).unwrap();
         let price_list: Vec<PriceItem> = serde_json::from_str(&text).unwrap();
-        let price_table: HashMap<String, f32> = price_list
+        let price_table: HashMap<String, PriceItem> = price_list
             .into_iter()
-            .map(|item| (item.name, item.custom_avg))
+            .map(|item| (item.name.clone(), item))
             .collect();
 
         let text =
@@ -89,7 +123,7 @@ impl Database {
                 .unwrap();
         let mut json = serde_json::from_str(&text).unwrap();
 
-        remove_empty_relics_from_json(&mut json);
+        let incomplete_relics = remove_empty_relics_from_json(&mut json);
 
         let filtered_items: FilteredItems = serde_json::from_value(json).unwrap();
 
@@ -114,11 +148,11 @@ impl Database {
                             }
                             _ => name.to_owned(),
                         };
-                        let platinum = *match price_table
+                        let price = match price_table
                             .get(name)
                             .or_else(|| price_table.get(&format!("{name} Blueprint")))
                         {
-                            Some(plat) => plat,
+                            Some(price) => price,
                             None => {
                                 println!("Failed to find price for item: {name}");
                                 return None;
@@ -129,8 +163,10 @@ impl Database {
                         Some(Item {
                             name: name.to_string(),
                             drop_name,
-                            platinum,
+                            platinum: price.custom_avg,
                             ducats,
+                            volume: price.yesterday_vol,
+                            vaulted: ducat_item.vaulted,
                         })
                     })
             })
@@ -139,8 +175,32 @@ impl Database {
                 drop_name: name.to_owned(),
                 platinum: 0.0,
                 ducats: 0,
+                volume: 0.0,
+                vaulted: false,
             }))
             .collect();
+
+        // Parts too recent for the item list still have a market price
+        let mut known: HashSet<String> = items
+            .iter()
+            .flat_map(|item| [item.name.clone(), item.drop_name.clone()])
+            .collect();
+        let mut price_only: Vec<_> = price_table
+            .values()
+            .filter(|price| !price.name.ends_with(" Set") && !known.contains(&price.name))
+            .collect();
+        price_only.sort_by(|a, b| a.name.cmp(&b.name));
+        for price in price_only {
+            known.insert(price.name.clone());
+            items.push(Item {
+                name: price.name.clone(),
+                drop_name: price.name.clone(),
+                platinum: price.custom_avg,
+                ducats: 0,
+                volume: price.yesterday_vol,
+                vaulted: false,
+            });
+        }
 
         if let Some(item) = items.iter_mut().find(|item| item.name == "Forma Blueprint") {
             item.platinum = 35.0 / 3.0;
@@ -148,7 +208,11 @@ impl Database {
 
         let relics = filtered_items.relics;
 
-        Database { items, relics }
+        Database {
+            items,
+            relics,
+            incomplete_relics,
+        }
     }
 
     pub fn find_item(&self, needle: &str, threshold: Option<usize>) -> Option<&Item> {
@@ -169,8 +233,96 @@ impl Database {
         })
     }
 
+    /// Closest item to `needle` (spaces ignored) and its edit distance
+    pub fn find_item_with_distance(&self, needle: &str) -> Option<(&Item, usize)> {
+        self.items
+            .iter()
+            .filter(|item| !item.name.ends_with("Set"))
+            .map(|item| (item, levenshtein(&item.drop_name.replace(' ', ""), needle)))
+            .min_by_key(|(_item, distance)| *distance)
+    }
+
     pub fn find_item_exact(&self, needle: &str) -> Option<&Item> {
         self.items.iter().find(|item| item.name == needle)
+    }
+
+    /// Replaces relic drop tables with the official ones published by Digital Extremes
+    /// (https://drops.warframestat.us/data/relics.json). Relics missing from them keep their
+    /// previous data.
+    pub fn load_official_relics(&mut self, path: &Path) -> Result<(), anyhow::Error> {
+        let official: OfficialRelics = serde_json::from_str(&read_to_string(path)?)?;
+        let mut count = 0;
+        for relic in official.relics {
+            let Some(code) = relic.relic_name else {
+                continue;
+            };
+            if relic.state != "Intact" {
+                continue;
+            }
+            let Some(relics) = self.relics_mut(&relic.tier) else {
+                continue;
+            };
+            // Intact chances: 1 rare at 2%, 2 uncommon at 11%, 3 common at 25.33%
+            let mut rewards = relic.rewards;
+            rewards.sort_by(|a, b| a.chance.total_cmp(&b.chance));
+            let [rare1, uncommon1, uncommon2, common1, common2, common3]: [OfficialReward; 6] =
+                match rewards.try_into() {
+                    Ok(rewards) => rewards,
+                    Err(_) => {
+                        warn!("Unexpected rewards for {} {code}", relic.tier);
+                        continue;
+                    }
+                };
+            // The official tables don't say whether a relic still drops
+            let vaulted = relics.get(&code).is_some_and(|relic| relic.vaulted);
+            relics.insert(
+                code.clone(),
+                Relic {
+                    vaulted,
+                    rare1: rare1.item_name,
+                    uncommon1: uncommon1.item_name,
+                    uncommon2: uncommon2.item_name,
+                    common1: common1.item_name,
+                    common2: common2.item_name,
+                    common3: common3.item_name,
+                },
+            );
+            self.incomplete_relics.remove(&(relic.tier.clone(), code));
+            count += 1;
+        }
+        info!("Loaded {count} official relic drop tables");
+        Ok(())
+    }
+
+    fn relics_mut(&mut self, era: &str) -> Option<&mut HashMap<String, Relic>> {
+        match era {
+            "Lith" => Some(&mut self.relics.lith),
+            "Meso" => Some(&mut self.relics.meso),
+            "Neo" => Some(&mut self.relics.neo),
+            "Axi" => Some(&mut self.relics.axi),
+            _ => None,
+        }
+    }
+
+    /// Platinum value of a relic reward, e.g. "Forma Blueprint" or "2X Forma Blueprint"
+    fn reward_value(&self, name: &str) -> f32 {
+        let (count, name) = match name.split_once("X ") {
+            Some((count, rest)) if count.parse::<u32>().is_ok() => {
+                (count.parse::<u32>().unwrap(), rest)
+            }
+            _ => (1, name),
+        };
+        match self
+            .items
+            .iter()
+            .find(|item| item.name == name || item.drop_name == name)
+        {
+            Some(item) => item.platinum * count as f32,
+            None => {
+                warn!("Failed to find item {name} in database");
+                0.0
+            }
+        }
     }
 
     fn relic_to_bucket(&self, relic: &Relic, refinement: Refinement) -> Bucket {
@@ -189,17 +341,34 @@ impl Database {
         let items = item_names
             .into_iter()
             .map(|(name, chance)| statistics::Item {
-                value: match self.find_item_exact(name) {
-                    Some(item) => item.platinum,
-                    None => {
-                        warn!("Failed to find item {name} in database");
-                        0.0
-                    }
-                },
+                value: self.reward_value(name),
                 probability: chance,
             })
             .collect();
         Bucket::new(items)
+    }
+
+    /// Codes of all the relics of an era, including those with an unknown drop table
+    pub fn relic_codes(&self, era: &str) -> Vec<&str> {
+        let complete = self
+            .relics_of_era(era)
+            .into_iter()
+            .flat_map(|relics| relics.keys());
+        let incomplete = self
+            .incomplete_relics
+            .iter()
+            .filter(|(incomplete_era, _)| incomplete_era.eq_ignore_ascii_case(era))
+            .map(|(_, code)| code);
+        complete.chain(incomplete).map(String::as_str).collect()
+    }
+
+    /// Whether a relic exists, even if its drop table is unknown
+    pub fn relic_exists(&self, era: &str, code: &str) -> bool {
+        self.relics_of_era(era)
+            .is_some_and(|relics| relics.contains_key(code))
+            || self
+                .incomplete_relics
+                .contains(&(era.to_owned(), code.to_owned()))
     }
 
     /// Relics of one era ("Lith", "Meso", "Neo" or "Axi", case insensitive)
@@ -356,13 +525,20 @@ impl Database {
     }
 }
 
-fn remove_empty_relics_from_json(value: &mut Value) {
+/// Removes relics with missing drops, returns them as (era, code)
+fn remove_empty_relics_from_json(value: &mut Value) -> HashSet<(String, String)> {
+    let mut removed = HashSet::new();
     let relics = &mut value["relics"];
-    for (_, kind) in relics.as_object_mut().unwrap() {
-        kind.as_object_mut()
-            .unwrap()
-            .retain(|_name, relic| serde_json::from_value::<Relic>(relic.clone()).is_ok());
+    for (era, kind) in relics.as_object_mut().unwrap() {
+        kind.as_object_mut().unwrap().retain(|name, relic| {
+            let complete = serde_json::from_value::<Relic>(relic.clone()).is_ok();
+            if !complete {
+                removed.insert((era.clone(), name.clone()));
+            }
+            complete
+        });
     }
+    removed
 }
 
 #[cfg(test)]

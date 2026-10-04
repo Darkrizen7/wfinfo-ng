@@ -17,6 +17,14 @@ pub fn fetch_prices_and_items() -> Result<(PathBuf, PathBuf), anyhow::Error> {
     Ok((prices, items))
 }
 
+/// Relic drop tables published by Digital Extremes
+pub fn fetch_official_relics() -> Result<PathBuf, anyhow::Error> {
+    download_and_save(
+        "https://drops.warframestat.us/data/relics.json",
+        "official_relics.json",
+    )
+}
+
 fn is_fresh(path: &Path) -> bool {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())

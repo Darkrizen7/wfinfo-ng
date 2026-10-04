@@ -48,6 +48,7 @@ When the highest value is determined by the ducat value and there is more than o
 # Overlay
 
 By default, prices are also shown in game: a transparent, click-through overlay is drawn over the Warframe window and displays the platinum and ducat values right above each reward's name, with the best item highlighted in gold.
+Each item also shows how many were sold on warframe.market the previous day (in orange when fewer than 5, it may be hard to sell) and whether it is vaulted.
 
 - `--overlay-duration <seconds>`: how long the prices stay on screen (default 20)
 - `--overlay-offset <pixels>`: distance between the prices and the item names (default 10)
@@ -62,11 +63,24 @@ On the Void Relics screen (relic selection before a fissure, or refinement), pre
 - its estimated value in platinum,
 - whether refining it is worth the Void Traces, and up to which refinement.
 
-The selected relic also gets the value at every refinement level. Press `F11` again to update the estimates (after scrolling or changing era) or to remove them once you left the screen.
+The selected relic also gets the value at every refinement level. Press `F11` again to update the estimates (after scrolling or changing era). They are removed automatically when you leave the screen (its title in the top left corner changes).
 
 Values assume a public squad: you get the best of your reward and the rewards of three players opening random intact relics of the same era.
 A refinement is recommended when it gains at least `--trace-threshold` platinum per Void Trace (default 0.025).
 Use `--relic-hotkey` to pick another key. `relics advice <era> [threshold]` prints the same numbers for every relic of an era.
+
+# Data sources
+
+Downloaded at startup when missing or older than a day, into the temporary directory:
+
+- relic drop tables: the official ones published by Digital Extremes, from [drops.warframestat.us](https://drops.warframestat.us/data/relics.json)
+- prices and sales volumes: warframe.market statistics, from [api.warframestat.us/wfinfo/prices](https://api.warframestat.us/wfinfo/prices/)
+- ducat values, vaulted status, and relics missing from the official tables: [api.warframestat.us/wfinfo/filtered_items](https://api.warframestat.us/wfinfo/filtered_items/)
+
+# Snap-it
+
+Press `F10` on any screen showing prime parts (inventory, trade, foundry, relic rewards list...) to show their price, ducat value, sales volume and vaulted status above each name.
+Press `F10` again to update the prices. They are removed automatically when you leave the screen. Use `--snapit-hotkey` to pick another key.
 
 # Issue and Workarounds
 

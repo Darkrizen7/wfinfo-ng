@@ -1,10 +1,9 @@
-use image::{imageops::FilterType, DynamicImage};
+use image::DynamicImage;
 use levenshtein::levenshtein;
 use log::debug;
 
 use crate::{
-    database::Database,
-    ocr::{PartRect, OCR},
+    database::Database, ocr::PartRect, screen_text::image_to_words,
     wfinfo_data::item_data::Refinement,
 };
 
@@ -22,72 +21,6 @@ pub struct RelicOnScreen {
     pub rect: PartRect,
     /// Name shown in the "Possible Rewards" panel of the selected relic
     pub selected: bool,
-}
-
-#[derive(Clone, Debug)]
-struct Word {
-    text: String,
-    rect: PartRect,
-    line: (u32, u32, u32),
-}
-
-/// Text in light colors on dark backgrounds is read better once inverted and enlarged
-const UPSCALE: f32 = 2.0;
-
-fn image_to_words(image: &DynamicImage) -> Vec<Word> {
-    let prepared = image
-        .grayscale()
-        .resize(
-            (image.width() as f32 * UPSCALE) as u32,
-            (image.height() as f32 * UPSCALE) as u32,
-            FilterType::Triangle,
-        )
-        .into_luma8();
-    let mut prepared = DynamicImage::ImageLuma8(prepared);
-    prepared.invert();
-    let prepared = prepared.into_rgb8();
-
-    let mut guard = OCR.lock().unwrap();
-    let ocr = guard.take().unwrap();
-    let mut ocr = ocr
-        .set_frame(
-            prepared.as_raw(),
-            prepared.width() as i32,
-            prepared.height() as i32,
-            3,
-            3 * prepared.width() as i32,
-        )
-        .expect("Failed to set image")
-        .recognize()
-        .expect("Failed to recognize text");
-    let tsv = ocr.get_tsv_text(0).unwrap_or_default();
-    guard.replace(ocr);
-    drop(guard);
-
-    tsv.lines()
-        .filter_map(|line| {
-            // level page block paragraph line word left top width height confidence text
-            let columns: Vec<_> = line.split('\t').collect();
-            if columns.len() < 12 || columns[0] != "5" {
-                return None;
-            }
-            let number = |index: usize| columns[index].parse::<f32>().ok();
-            let text = columns[11].trim();
-            if text.is_empty() {
-                return None;
-            }
-            Some(Word {
-                text: text.to_owned(),
-                rect: PartRect {
-                    x: number(6)? / UPSCALE,
-                    y: number(7)? / UPSCALE,
-                    width: number(8)? / UPSCALE,
-                    height: number(9)? / UPSCALE,
-                },
-                line: (number(2)? as u32, number(3)? as u32, number(4)? as u32),
-            })
-        })
-        .collect()
 }
 
 fn letters(text: &str) -> String {
@@ -116,8 +49,16 @@ fn parse_refinement(text: &str) -> Option<Refinement> {
     .map(|(_, refinement)| refinement)
 }
 
-/// Relic codes are a letter followed by a number; fixes the usual OCR confusions
-fn parse_code(text: &str, database: &Database, era: &str) -> Option<String> {
+/// Relic codes are a letter followed by a number; fixes the usual OCR confusions.
+///
+/// `followed_by_relic` tells whether the word "Relic" comes next, which confirms a relic name
+/// even when its code is missing from the downloaded data.
+fn parse_code(
+    text: &str,
+    database: &Database,
+    era: &str,
+    followed_by_relic: bool,
+) -> Option<String> {
     let text: String = text.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let mut chars = text.chars();
     let letter = match chars.next()?.to_ascii_uppercase() {
@@ -143,10 +84,22 @@ fn parse_code(text: &str, database: &Database, era: &str) -> Option<String> {
         return None;
     }
     let code = format!("{letter}{digits}");
-    database
-        .relics_of_era(era)?
-        .contains_key(&code)
-        .then_some(code)
+    if database.relic_exists(era, &code) {
+        return Some(code);
+    }
+
+    // A character too many or misread, e.g. "E1" read as "ET1": only trust a single candidate
+    let close: Vec<_> = database
+        .relic_codes(era)
+        .into_iter()
+        .filter(|known| levenshtein(known, &code) == 1 && known.starts_with(letter))
+        .collect();
+    if let [known] = close[..] {
+        return Some(known.to_owned());
+    }
+
+    // Probably a relic newer than the downloaded data
+    (followed_by_relic && digits.len() <= 2).then_some(code)
 }
 
 /// Finds all "<Era> <Code>" relic names in a screenshot, along with their refinement when written nearby
@@ -163,7 +116,10 @@ pub fn find_relics(image: &DynamicImage, database: &Database) -> Vec<RelicOnScre
         .filter(|(_, pair)| pair[0].line == pair[1].line)
         .filter_map(|(index, pair)| {
             let era = parse_era(&pair[0].text)?;
-            let code = parse_code(&pair[1].text, database, era)?;
+            let followed_by_relic = words
+                .get(index + 2)
+                .is_some_and(|word| word.line == pair[1].line && letters(&word.text) == "relic");
+            let code = parse_code(&pair[1].text, database, era, followed_by_relic)?;
             let (first, second) = (pair[0].rect, pair[1].rect);
             let top = first.y.min(second.y);
             let bottom = (first.y + first.height).max(second.y + second.height);
