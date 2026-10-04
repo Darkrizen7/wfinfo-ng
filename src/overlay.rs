@@ -285,12 +285,12 @@ fn draw_reward_label(ui: &mut egui::Ui, label: &RewardLabel) {
                 let mut details = LayoutJob::default();
                 let format = |color| TextFormat::simple(FontId::proportional(12.0), color);
                 details.append(
-                    &format!("{} ventes/j", label.volume),
+                    &format!("{} sold/day", label.volume),
                     0.0,
                     format(volume_color),
                 );
                 if label.vaulted {
-                    details.append(" · vaulté", 0.0, format(GOLD));
+                    details.append(" · vaulted", 0.0, format(GOLD));
                 }
                 ui.label(details);
             });
@@ -299,10 +299,10 @@ fn draw_reward_label(ui: &mut egui::Ui, label: &RewardLabel) {
 
 fn refinement_name(refinement: Refinement) -> &'static str {
     match refinement {
-        Refinement::Intact => "Intacte",
-        Refinement::Exceptional => "Exceptionnelle",
-        Refinement::Flawless => "Impeccable",
-        Refinement::Radiant => "Rayonnante",
+        Refinement::Intact => "Intact",
+        Refinement::Exceptional => "Exceptional",
+        Refinement::Flawless => "Flawless",
+        Refinement::Radiant => "Radiant",
     }
 }
 
@@ -322,7 +322,7 @@ fn draw_relic_label(ui: &mut egui::Ui, label: &RelicLabel) {
                             .color(Color32::GRAY),
                     );
                     ui.label(
-                        RichText::new("Contenu inconnu")
+                        RichText::new("Unknown rewards")
                             .size(12.0)
                             .color(Color32::GRAY),
                     );
@@ -379,12 +379,12 @@ fn draw_relic_label(ui: &mut egui::Ui, label: &RelicLabel) {
                 }
                 let advice_text = if let Some((refinement, per_trace)) = recommendation {
                     RichText::new(format!(
-                        "Raffiner → {} ({per_trace:+.3} p/trace)",
+                        "Refine → {} ({per_trace:+.3} p/trace)",
                         refinement_name(refinement),
                     ))
                     .color(GREEN)
                 } else {
-                    RichText::new("Pas la peine de raffiner").color(Color32::GRAY)
+                    RichText::new("Not worth refining").color(Color32::GRAY)
                 };
                 ui.label(advice_text.size(12.0));
             });
