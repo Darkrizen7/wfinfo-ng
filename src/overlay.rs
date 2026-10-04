@@ -210,16 +210,25 @@ fn draw_label(ui: &mut egui::Ui, label: &RewardLabel) {
                 let color = if label.best { GOLD } else { Color32::WHITE };
                 let star = if label.best { "★ " } else { "" };
                 ui.label(
-                    RichText::new(format!("{star}{} p", label.platinum))
+                    RichText::new(format!("{star}{} p", format_platinum(label.platinum)))
                         .size(22.0)
                         .strong()
                         .color(color),
                 );
                 ui.label(
-                    RichText::new(format!("ducats: {} p", label.ducats_platinum))
+                    RichText::new(format!("ducats: {} p", format_platinum(label.ducats_platinum)))
                         .size(14.0)
                         .color(Color32::LIGHT_GRAY),
                 );
             });
         });
+}
+
+/// One decimal at most: 11.666667 -> "11.7", 3.0 -> "3"
+fn format_platinum(value: f32) -> String {
+    let rounded = format!("{value:.1}");
+    rounded
+        .strip_suffix(".0")
+        .map(str::to_owned)
+        .unwrap_or(rounded)
 }
