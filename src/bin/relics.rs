@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use wfinfo::{
     database::Database,
+    utils::{fetch_official_relics, fetch_prices_and_items},
     wfinfo_data::item_data::{Refinement, Relic},
 };
 
@@ -88,15 +89,22 @@ fn advice_dump(database: &Database, era: &str, trace_threshold: f32) {
             })
             .collect();
         let recommendation = advice.recommendation(Refinement::Intact);
+        let vaulted = if relics[name].vaulted { "vaulted" } else { "" };
         println!(
-            "{era} {name}:\t{}\t-> {recommendation:?}",
+            "{era} {name}:\t{}\t-> {recommendation:?}\t{vaulted}",
             values.join("\t")
         );
     }
 }
 
 fn main() {
-    let database = Database::load_from_file(None, None);
+    // Same data as the overlay: fresh prices and the official drop tables
+    let (prices, items) = fetch_prices_and_items().expect("Failed to download prices");
+    let mut database = Database::load_from_file(Some(&prices), Some(&items));
+    if let Err(err) = fetch_official_relics().and_then(|path| database.load_official_relics(&path))
+    {
+        eprintln!("Using relic data from WFInfo only: {err:#}");
+    }
     let mut args = std::env::args().skip(1);
     let relics = match args
         .next()
@@ -116,7 +124,7 @@ fn main() {
             let era = args.next().expect("No relic era provided");
             let threshold = args
                 .next()
-                .map_or(0.1, |t| t.parse().expect("Invalid threshold"));
+                .map_or(0.02, |t| t.parse().expect("Invalid threshold"));
             advice_dump(&database, &era, threshold);
             return;
         }

@@ -300,7 +300,7 @@ struct Arguments {
     #[arg(long, default_value_t = 10.0)]
     overlay_offset: f32,
     /// Minimum platinum gained per Void Trace for a relic refinement to be recommended
-    #[arg(long, default_value_t = 0.025)]
+    #[arg(long, default_value_t = 0.02)]
     trace_threshold: f32,
     /// Hotkey to analyze the relics on screen (selection or refinement screen)
     #[arg(long, default_value = "F11")]

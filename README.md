@@ -66,7 +66,7 @@ On the Void Relics screen (relic selection before a fissure, or refinement), pre
 The selected relic also gets the value at every refinement level. Press `F11` again to update the estimates (after scrolling or changing era). They are removed automatically when you leave the screen (its title in the top left corner changes).
 
 Values assume a public squad: you get the best of your reward and the rewards of three players opening random intact relics of the same era.
-A refinement is recommended when it gains at least `--trace-threshold` platinum per Void Trace (default 0.025).
+A refinement is recommended when it gains at least `--trace-threshold` platinum per Void Trace (default 0.02: with 6 to 30 traces earned per fissure and one relic opened per mission, that is about what can be spent without running out).
 Use `--relic-hotkey` to pick another key. `relics advice <era> [threshold]` prints the same numbers for every relic of an era.
 
 # Data sources
