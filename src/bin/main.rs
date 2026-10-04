@@ -27,9 +27,44 @@ use wfinfo::{
     relic_detection::find_relics,
     screen_text,
     snapit::find_items,
+    trace_threshold,
     utils::{fetch_official_relics, fetch_prices_and_items},
     wfinfo_data::item_data::Refinement,
 };
+
+fn print_threshold_table(
+    advices: &[wfinfo::database::RelicAdvice],
+    balanced: f32,
+    traces_per_relic: f32,
+) {
+    println!(
+        "Over {} relics, refining when the gain per trace is above:",
+        advices.len()
+    );
+    println!("threshold\ttraces/relic\tplatinum/relic\trefined");
+    let mut thresholds = vec![
+        0.0, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, balanced,
+    ];
+    thresholds.sort_by(|a, b| a.total_cmp(b));
+    for threshold in thresholds {
+        let spending = trace_threshold::spending(advices, threshold);
+        println!(
+            "{:.3}\t\t{:.1}\t\t{:.2}\t\t{:.0}%{}",
+            threshold,
+            spending.traces_per_relic,
+            spending.platinum_per_relic,
+            spending.refined_share * 100.0,
+            if threshold == balanced {
+                "\t<- balanced"
+            } else {
+                ""
+            }
+        );
+    }
+    println!(
+        "\nWith {traces_per_relic} traces earned per relic opened, use --trace-threshold {balanced:.3}"
+    );
+}
 
 /// What to look for on screen
 #[derive(Clone, Copy, Debug)]
@@ -302,6 +337,15 @@ struct Arguments {
     /// Minimum platinum gained per Void Trace for a relic refinement to be recommended
     #[arg(long, default_value_t = 0.02)]
     trace_threshold: f32,
+    /// Compute the trace threshold from today's prices at startup instead of using --trace-threshold
+    #[arg(long)]
+    auto_threshold: bool,
+    /// Print how many traces and how much platinum each threshold spends and earns, then exit
+    #[arg(long)]
+    compute_threshold: bool,
+    /// Void Traces earned per relic opened, used to compute the threshold
+    #[arg(long, default_value_t = trace_threshold::AVERAGE_TRACES_PER_MISSION)]
+    traces_per_relic: f32,
     /// Hotkey to analyze the relics on screen (selection or refinement screen)
     #[arg(long, default_value = "F11")]
     relic_hotkey: String,
@@ -349,6 +393,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Loaded database");
 
+    let mut trace_threshold = arguments.trace_threshold;
+    if arguments.compute_threshold || arguments.auto_threshold {
+        let advices = trace_threshold::all_relic_advice(&db);
+        let balanced = trace_threshold::balanced_threshold(&advices, arguments.traces_per_relic);
+        if arguments.compute_threshold {
+            print_threshold_table(&advices, balanced, arguments.traces_per_relic);
+            screen_text::shut_down();
+            return Ok(());
+        }
+        info!("Trace threshold: {balanced:.3} platinum per trace");
+        trace_threshold = balanced;
+    }
+
     if let Some(test_image) = arguments.test_image {
         let image = image::open(test_image)?;
         if arguments.test_title {
@@ -373,7 +430,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             Trigger::Rewards
         };
-        let labels = detect(image, &db, trigger, arguments.trace_threshold);
+        let labels = detect(image, &db, trigger, trace_threshold);
         drop(OCR.lock().unwrap().take());
         screen_text::shut_down();
         if arguments.no_overlay {
@@ -419,7 +476,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         event_sender,
     );
 
-    let trace_threshold = arguments.trace_threshold;
     if arguments.no_overlay {
         detection_loop(event_receiver, warframe_window, db, trace_threshold, None);
         return Ok(());

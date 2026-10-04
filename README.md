@@ -67,6 +67,7 @@ The selected relic also gets the value at every refinement level. Press `F11` ag
 
 Values assume a public squad: you get the best of your reward and the rewards of three players opening random intact relics of the same era.
 A refinement is recommended when it gains at least `--trace-threshold` platinum per Void Trace (default 0.02: with 6 to 30 traces earned per fissure and one relic opened per mission, that is about what can be spent without running out).
+To recompute the best threshold from today's prices, run `wfinfo --compute-threshold`: it prints how many traces and how much platinum each threshold spends and earns per relic, and the threshold that spends traces as fast as they are earned. Pass `--traces-per-relic` if you earn more or fewer than 18 traces per relic opened. `--auto-threshold` uses that computed threshold instead of `--trace-threshold`.
 Use `--relic-hotkey` to pick another key. `relics advice <era> [threshold]` prints the same numbers for every relic of an era.
 
 # Data sources

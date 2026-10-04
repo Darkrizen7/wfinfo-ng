@@ -7,5 +7,6 @@ pub mod snapit;
 pub mod statistics;
 pub mod testing;
 pub mod theme;
+pub mod trace_threshold;
 pub mod utils;
 pub mod wfinfo_data;
