@@ -280,17 +280,7 @@ pub fn extract_parts_with_rects(
         .collect()
 }
 
-pub fn filter_and_separate_parts_from_part_box(
-    image: DynamicImage,
-    theme: Theme,
-) -> Vec<DynamicImage> {
-    filter_and_separate_parts_with_rects(image, theme)
-        .into_iter()
-        .map(|(part, _rect)| part)
-        .collect()
-}
-
-/// Like [`filter_and_separate_parts_from_part_box`], also returning each part's position relative to the part box
+/// Splits the reward names box into one image per player, with each part's position relative to the box
 pub fn filter_and_separate_parts_with_rects(
     image: DynamicImage,
     theme: Theme,

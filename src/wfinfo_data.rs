@@ -83,7 +83,6 @@ pub mod item_data {
 
     #[derive(Clone, Debug, Deserialize)]
     pub struct FilteredItems {
-        pub errors: Vec<String>,
         pub relics: Relics,
         pub eqmt: HashMap<String, EquipmentItem>,
         pub ignored_items: HashMap<String, DucatItem>,

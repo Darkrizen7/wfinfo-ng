@@ -17,12 +17,11 @@ use crate::{
     },
 };
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Database {
     items: Vec<Item>,
     pub relics: Relics,
     /// Relics whose drop table is incomplete in the downloaded data, as (era, code)
-    #[serde(default)]
     pub incomplete_relics: HashSet<(String, String)>,
 }
 
@@ -95,16 +94,14 @@ impl RelicAdvice {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Item {
     pub name: String,
     pub drop_name: String,
     pub platinum: f32,
     pub ducats: usize,
     /// Number of trades on the previous day
-    #[serde(default)]
     pub volume: f32,
-    #[serde(default)]
     pub vaulted: bool,
 }
 
@@ -129,8 +126,8 @@ impl Database {
 
         let mut items: Vec<_> = filtered_items
             .eqmt
-            .iter()
-            .flat_map(|(_name, equipment_item)| {
+            .values()
+            .flat_map(|equipment_item| {
                 equipment_item
                     .parts
                     .iter()
@@ -222,14 +219,9 @@ impl Database {
             .filter(|item| !item.name.ends_with("Set"))
             .min_by_key(|item| levenshtein(&item.drop_name, needle));
 
-        best_match.and_then(|item| {
-            if levenshtein(&item.drop_name.replace(' ', ""), needle)
+        best_match.filter(|&item| {
+            levenshtein(&item.drop_name.replace(' ', ""), needle)
                 <= threshold.unwrap_or(item.drop_name.len() / 3)
-            {
-                Some(item)
-            } else {
-                None
-            }
         })
     }
 
@@ -400,17 +392,8 @@ impl Database {
     }
 
     /// Expected platinum of the reward picked in a public squad: the best of this relic's
-    /// reward and the rewards of three other players opening random intact relics of the same era
-    pub fn public_relic_value(&self, relic: &Relic, era: &str, refinement: Refinement) -> f32 {
-        self.public_relic_value_against(relic, refinement, &self.era_bucket(era))
-    }
-
-    fn public_relic_value_against(
-        &self,
-        relic: &Relic,
-        refinement: Refinement,
-        others: &Bucket,
-    ) -> f32 {
+    /// reward and the rewards of three other players drawing from `others`
+    fn public_relic_value(&self, relic: &Relic, refinement: Refinement, others: &Bucket) -> f32 {
         let own = self.relic_to_bucket(relic, refinement);
         statistics::expectation_of_best(&[&own, others, others, others])
     }
@@ -422,7 +405,7 @@ impl Database {
         let others = self.era_bucket(era);
         let values = Refinement::ALL.map(|refinement| RefinementValue {
             refinement,
-            platinum: self.public_relic_value_against(relic, refinement, &others),
+            platinum: self.public_relic_value(relic, refinement, &others),
             platinum_per_trace: 0.0,
         });
         let intact = values[0].platinum;
@@ -437,40 +420,6 @@ impl Database {
             values,
             trace_threshold,
         }
-    }
-
-    pub fn single_relic_value(&self, relic: &Relic, refinement: Refinement) -> f32 {
-        let common_chance = refinement.common_chance();
-        let uncommon_chance = refinement.uncommon_chance();
-        let rare_chance = refinement.rare_chance();
-
-        let value = 0.0
-            + self.find_item_exact(&relic.common1).unwrap().platinum * common_chance
-            + self.find_item_exact(&relic.common2).unwrap().platinum * common_chance
-            + self.find_item_exact(&relic.common3).unwrap().platinum * common_chance
-            + self.find_item_exact(&relic.uncommon1).unwrap().platinum * uncommon_chance
-            + self.find_item_exact(&relic.uncommon2).unwrap().platinum * uncommon_chance
-            + self.find_item_exact(&relic.rare1).unwrap().platinum * rare_chance;
-
-        let item_names = [
-            (&relic.common1, common_chance),
-            (&relic.common2, common_chance),
-            (&relic.common3, common_chance),
-            (&relic.uncommon1, uncommon_chance),
-            (&relic.uncommon2, uncommon_chance),
-            (&relic.rare1, rare_chance),
-        ];
-        let value2: f32 = item_names
-            .into_iter()
-            .map(|(name, chance)| {
-                let plat = self.find_item_exact(name).unwrap().platinum;
-                println!("{plat} * {chance}");
-                plat * chance
-            })
-            .sum();
-        println!("{value} vs {value2}");
-
-        value
     }
 
     pub fn shared_relic_value(

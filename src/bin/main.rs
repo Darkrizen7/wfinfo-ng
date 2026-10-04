@@ -20,10 +20,7 @@ use xcap::Window;
 
 use wfinfo::{
     database::Database,
-    ocr::{
-        normalize_string, reward_image_to_reward_names, reward_image_to_reward_names_with_rects,
-        OCR,
-    },
+    ocr::{normalize_string, reward_image_to_reward_names_with_rects, OCR},
     overlay::{
         run_overlay, Label, OverlayHandle, OverlayOptions, RelicLabel, RewardLabel, WindowGeometry,
     },
@@ -281,21 +278,6 @@ fn hotkey_watcher(hotkeys: Vec<(HotKey, Trigger)>, event_sender: mpsc::Sender<Tr
     });
 }
 
-#[allow(dead_code)]
-fn benchmark() -> Result<(), Box<dyn Error>> {
-    for _ in 0..10 {
-        let image = image::open("input3.png").unwrap();
-        println!("Converted");
-        let text = reward_image_to_reward_names(image, None);
-        println!("got names");
-        let text = text.iter().map(|s| normalize_string(s));
-        println!("{:#?}", text);
-    }
-    // clean up tesseract
-    drop(OCR.lock().unwrap().take());
-    Ok(())
-}
-
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Arguments {
@@ -525,7 +507,7 @@ fn detection_loop(
             // updates them, or clears them when nothing is found anymore
             Trigger::Relics | Trigger::Items => {
                 watched = (!labels.is_empty() && !title.is_empty())
-                    .then(|| WatchedScreen { title, changes: 0 });
+                    .then_some(WatchedScreen { title, changes: 0 });
                 overlay.show_until_replaced(labels)
             }
         }
@@ -546,6 +528,7 @@ mod test {
     use tesseract::Tesseract;
     use wfinfo::ocr::detect_theme;
     use wfinfo::ocr::extract_parts;
+    use wfinfo::ocr::reward_image_to_reward_names;
     use wfinfo::testing::Label;
 
     use super::*;
